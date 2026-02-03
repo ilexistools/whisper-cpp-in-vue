@@ -1,5 +1,7 @@
 // src/lib/whisperBridge.js
-// Ponte entre Vue e os scripts padrao do whisper.cpp (helpers.js + libstream.js)
+// Ponte entre Vue e os scripts padrão do whisper.cpp (helpers.js + libstream.js)
+// Estratégia ORIGINAL do stream.wasm + compatível com App.vue
+// Ajuste: NÃO limita linhas e EVITA duplicação de trechos repetidos
 
 export function createWhisperBridge(opts) {
   const {
@@ -16,25 +18,29 @@ export function createWhisperBridge(opts) {
     persist,
   } = opts || {};
 
-  // audio context
+  // -----------------------------
+  // Estado (igual ao exemplo)
+  // -----------------------------
   let context = null;
 
-  // audio buffers
+  // buffers
   let audio = null;
   let audio0 = null;
 
   // whisper instance
   let instance = null;
 
-  // estado transcript
+  // transcript
   let transcribedAll = "";
-  let nLines = 0;
+  let nLines = 0; // agora é só contador (opcional)
   let intervalUpdate = null;
 
   // model
   let model_whisper = null;
 
-  // recording
+  // -----------------------------
+  // Constantes ORIGINAIS (stream.wasm)
+  // -----------------------------
   const kSampleRate = 16000;
   const kRestartRecording_s = 120;
   const kIntervalAudio_ms = 5000;
@@ -46,16 +52,65 @@ export function createWhisperBridge(opts) {
   window.AudioContext = window.AudioContext || window.webkitAudioContext;
   window.OfflineAudioContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
 
-  function dbg(msg) {
-    try {
-      onDebug && onDebug(msg);
-    } catch (e) {}
+  // -----------------------------
+  // Anti-duplicação (NOVO)
+  // -----------------------------
+  let lastAppended = "";              // último trecho anexado
+  const recentWindow = [];            // janela de trechos recentes
+  const RECENT_MAX = 12;              // tamanho da janela (pequeno, eficiente)
+
+  function normalizeChunk(s) {
+    // normalização leve pra comparar sem “enganos” por espaço/pontuação
+    return String(s || "")
+      .replace(/\s+/g, " ")
+      .replace(/<br\s*\/?>/gi, "<br>")
+      .trim();
   }
 
-  function setBanner(msg) {
-    try {
-      onBanner && onBanner(msg);
-    } catch (e) {}
+  function shouldAppend(chunkRaw) {
+    const chunk = normalizeChunk(chunkRaw);
+    if (!chunk || chunk.length < 2) return false;
+
+    const last = normalizeChunk(lastAppended);
+
+    // 1) idêntico ao último -> ignora
+    if (chunk === last) return false;
+
+    // 2) apareceu recentemente -> ignora (evita eco curto)
+    for (const r of recentWindow) {
+      if (chunk === r) return false;
+    }
+
+    // 3) alguns builds devolvem texto cumulativo (crescendo)
+    //    Se o chunk começa com o último, tenta anexar só o sufixo novo.
+    //    Ex: last="oi" chunk="oi tudo bem" => anexa "tudo bem"
+    if (last && chunk.startsWith(last) && chunk.length > last.length + 1) {
+      const suffix = chunk.slice(last.length).trim();
+      if (suffix.length > 0) {
+        // substitui o conteúdo bruto por só o sufixo (sem perder o HTML <br>)
+        return { ok: true, append: suffix };
+      }
+    }
+
+    return { ok: true, append: chunkRaw };
+  }
+
+  function pushRecent(chunkRaw) {
+    const c = normalizeChunk(chunkRaw);
+    if (!c) return;
+    recentWindow.push(c);
+    while (recentWindow.length > RECENT_MAX) recentWindow.shift();
+  }
+
+  // -----------------------------
+  // Helpers UI
+  // -----------------------------
+  function dbg(msg) {
+    try { onDebug && onDebug(String(msg)); } catch {}
+  }
+
+  function banner(msg) {
+    try { onBanner && onBanner(String(msg)); } catch {}
   }
 
   function formatMMSS(ms) {
@@ -66,44 +121,51 @@ export function createWhisperBridge(opts) {
   }
 
   function emitStatus() {
-    try {
-      onStatus && onStatus({ isRunning: !!doRecording });
-    } catch (e) {}
+    try { onStatus && onStatus({ isRunning: !!doRecording }); } catch {}
   }
 
   function emitTimer() {
-    try {
-      onTimer && onTimer(doRecording ? formatMMSS(Date.now() - startTime) : "00m 00s");
-    } catch (e) {}
+    try { onTimer && onTimer(doRecording ? formatMMSS(Date.now() - startTime) : "00m 00s"); } catch {}
   }
 
   function emitTranscript() {
     try {
-      onTranscriptHtml && onTranscriptHtml(transcribedAll && transcribedAll.length ? transcribedAll : "[A transcricao vai aparecer aqui]");
-    } catch (e) {}
+      const val = transcribedAll && transcribedAll.length ? transcribedAll : "[A transcrição vai aparecer aqui]";
+      onTranscriptHtml && onTranscriptHtml(val);
+    } catch {}
   }
 
   function scheduleAutosave() {
-    try {
-      persist && persist.scheduleAutosave && persist.scheduleAutosave();
-    } catch (e) {}
+    try { persist && persist.scheduleAutosave && persist.scheduleAutosave(); } catch {}
   }
 
+  // -----------------------------
+  // stopRecording (igual ao exemplo)
+  // -----------------------------
   function stopRecording() {
     try {
       if (window.Module && window.Module.set_status) window.Module.set_status("paused");
-    } catch (e) {}
+    } catch {}
 
     doRecording = false;
     audio0 = null;
     audio = null;
     context = null;
 
+    try {
+      if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+    } catch {}
+
+    mediaRecorder = null;
+
     emitStatus();
     emitTimer();
     scheduleAutosave();
   }
 
+  // -----------------------------
+  // startRecording (estratégia ORIGINAL)
+  // -----------------------------
   function startRecording() {
     if (!context) {
       context = new AudioContext({
@@ -117,7 +179,7 @@ export function createWhisperBridge(opts) {
 
     try {
       if (window.Module && window.Module.set_status) window.Module.set_status("");
-    } catch (e) {}
+    } catch {}
 
     doRecording = true;
     startTime = Date.now();
@@ -126,43 +188,44 @@ export function createWhisperBridge(opts) {
     emitTimer();
     scheduleAutosave();
 
-    var chunks = [];
-    var stream = null;
+    let chunks = [];
+    let stream = null;
 
     navigator.mediaDevices
       .getUserMedia({ audio: true, video: false })
-      .then(function(s) {
+      .then(function (s) {
         stream = s;
         mediaRecorder = new MediaRecorder(stream);
 
-        mediaRecorder.ondataavailable = function(e) {
+        mediaRecorder.ondataavailable = function (e) {
           chunks.push(e.data);
 
-          var blob = new Blob(chunks, { type: "audio/ogg; codecs=opus" });
-          var reader = new FileReader();
+          const blob = new Blob(chunks, { type: "audio/ogg; codecs=opus" });
+          const reader = new FileReader();
 
-          reader.onload = function() {
-            var buf = new Uint8Array(reader.result);
+          reader.onload = function () {
+            const buf = new Uint8Array(reader.result);
 
             if (!context) return;
 
             context.decodeAudioData(
               buf.buffer,
-              function(audioBuffer) {
-                var offlineContext = new OfflineAudioContext(
+              function (audioBuffer) {
+                const offlineContext = new OfflineAudioContext(
                   audioBuffer.numberOfChannels,
                   audioBuffer.length,
                   audioBuffer.sampleRate
                 );
-                var source = offlineContext.createBufferSource();
+
+                const source = offlineContext.createBufferSource();
                 source.buffer = audioBuffer;
                 source.connect(offlineContext.destination);
                 source.start(0);
 
-                offlineContext.startRendering().then(function(renderedBuffer) {
+                offlineContext.startRendering().then(function (renderedBuffer) {
                   audio = renderedBuffer.getChannelData(0);
 
-                  var audioAll = new Float32Array(audio0 == null ? audio.length : audio0.length + audio.length);
+                  const audioAll = new Float32Array(audio0 == null ? audio.length : audio0.length + audio.length);
                   if (audio0 != null) audioAll.set(audio0, 0);
                   audioAll.set(audio, audio0 == null ? 0 : audio0.length);
 
@@ -171,7 +234,7 @@ export function createWhisperBridge(opts) {
                   }
                 });
               },
-              function() {
+              function () {
                 audio = null;
               }
             );
@@ -180,51 +243,43 @@ export function createWhisperBridge(opts) {
           reader.readAsArrayBuffer(blob);
         };
 
-        mediaRecorder.onstop = function() {
+        mediaRecorder.onstop = function () {
           if (doRecording) {
-            setTimeout(function() { startRecording(); }, 0);
+            setTimeout(function () {
+              startRecording();
+            }, 0);
           }
         };
 
         mediaRecorder.start(kIntervalAudio_ms);
       })
-      .catch(function(err) {
+      .catch(function (err) {
         dbg("js: error getting audio stream: " + err);
-        setBanner("Erro ao acessar microfone. Confira permissoes.");
+        banner("Erro ao acessar microfone. Verifique permissões.");
+        doRecording = false;
+        emitStatus();
       });
 
-    var interval = setInterval(function() {
+    const interval = setInterval(function () {
       if (!doRecording) {
         clearInterval(interval);
 
-        try {
-          if (mediaRecorder) mediaRecorder.stop();
-        } catch (e) {}
-
-        try {
-          if (stream) stream.getTracks().forEach(function(t) { t.stop(); });
-        } catch (e) {}
+        try { if (mediaRecorder) mediaRecorder.stop(); } catch {}
+        try { if (stream) stream.getTracks().forEach(function (t) { t.stop(); }); } catch {}
 
         mediaRecorder = null;
-
         scheduleAutosave();
         return;
       }
 
-      // restart por janela grande
       if (audio != null && audio.length > kSampleRate * kRestartRecording_s) {
         clearInterval(interval);
 
         audio0 = audio;
         audio = null;
 
-        try {
-          if (mediaRecorder) mediaRecorder.stop();
-        } catch (e) {}
-
-        try {
-          if (stream) stream.getTracks().forEach(function(t) { t.stop(); });
-        } catch (e) {}
+        try { if (mediaRecorder) mediaRecorder.stop(); } catch {}
+        try { if (stream) stream.getTracks().forEach(function (t) { t.stop(); }); } catch {}
 
         scheduleAutosave();
       }
@@ -233,12 +288,16 @@ export function createWhisperBridge(opts) {
     }, 100);
   }
 
+  // -----------------------------
+  // init / instance
+  // -----------------------------
   function ensureInstance() {
     if (instance) return true;
     if (!window.Module || !window.Module.init) return false;
 
-    var lang = (getLanguage && getLanguage()) || "pt";
+    const lang = (getLanguage && getLanguage()) || "pt";
     instance = window.Module.init("whisper.bin", lang);
+
     if (instance) {
       dbg("js: whisper initialized, instance: " + instance);
       return true;
@@ -246,47 +305,51 @@ export function createWhisperBridge(opts) {
     return false;
   }
 
+  // -----------------------------
+  // start / stop
+  // -----------------------------
   function start() {
     if (!model_whisper) {
-      setBanner("Carregue um modelo primeiro.");
+      banner("Carregue um modelo primeiro.");
       return false;
     }
 
     if (!ensureInstance()) {
       dbg("js: failed to initialize whisper");
-      setBanner("Falha ao inicializar Whisper (veja Debug).");
+      banner("Falha ao inicializar Whisper (veja Debug).");
       return false;
     }
-
-    startRecording();
 
     if (intervalUpdate) {
       clearInterval(intervalUpdate);
       intervalUpdate = null;
     }
 
-    intervalUpdate = setInterval(function() {
+    startRecording();
+
+    intervalUpdate = setInterval(function () {
       try {
-        var transcribed = window.Module && window.Module.get_transcribed ? window.Module.get_transcribed() : null;
+        const transcribed = window.Module && window.Module.get_transcribed ? window.Module.get_transcribed() : null;
+
         if (transcribed != null && transcribed.length > 1) {
-          transcribedAll += transcribed + "<br>";
-          nLines++;
+          const decision = shouldAppend(transcribed);
 
-          // mantem ultimas 10 linhas (mesmo comportamento do exemplo)
-          if (nLines > 10) {
-            var i = transcribedAll.indexOf("<br>");
-            if (i > 0) {
-              transcribedAll = transcribedAll.substring(i + 4);
-              nLines--;
-            }
+          if (decision && decision.ok) {
+            const toAppend = decision.append;
+
+            // mantém HTML com <br> no final (como você já usa na UI)
+            transcribedAll += toAppend + "<br>";
+            nLines++;
+
+            lastAppended = toAppend;
+            pushRecent(toAppend);
+
+            // partial (opcional na UI)
+            try { onPartialText && onPartialText(""); } catch {}
+
+            scheduleAutosave();
           }
-
-          scheduleAutosave();
         }
-
-        var status = (window.Module && window.Module.get_status) ? window.Module.get_status() : "";
-        var hidden = document.getElementById("state-status");
-        if (hidden) hidden.innerHTML = status;
 
         emitTranscript();
         emitStatus();
@@ -296,64 +359,97 @@ export function createWhisperBridge(opts) {
       }
     }, 100);
 
+    banner("Gravando…");
     return true;
   }
 
   function stop() {
     stopRecording();
+
+    if (intervalUpdate) {
+      clearInterval(intervalUpdate);
+      intervalUpdate = null;
+    }
+
+    banner("Parado.");
     emitTranscript();
     scheduleAutosave();
   }
 
+  // -----------------------------
+  // Transcript helpers
+  // -----------------------------
   function clearTranscript() {
     transcribedAll = "";
     nLines = 0;
-    if (onPartialText) onPartialText("");
+    lastAppended = "";
+    recentWindow.length = 0;
+    try { onPartialText && onPartialText(""); } catch {}
     emitTranscript();
     scheduleAutosave();
   }
 
+  function setTranscriptHtml(html) {
+    transcribedAll = html || "";
+  }
+
+  function getTranscriptHtml() {
+    return transcribedAll;
+  }
+
+  function getNLines() {
+    return nLines;
+  }
+
+  function setNLines(v) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n >= 0) nLines = n;
+  }
+
+  // -----------------------------
+  // Cache (helpers.js define clearCache())
+  // -----------------------------
   function clearCache() {
     if (typeof window.clearCache === "function") {
       window.clearCache();
       dbg("js: clearCache called");
+    } else {
+      dbg("js: clearCache not available");
     }
   }
 
+  // -----------------------------
+  // Model loading (helpers.js loadRemote + FS)
+  // -----------------------------
   function storeFS(fname, buf) {
-    // do exemplo: grava o modelo no FS do Emscripten
     try {
-      if (window.Module && window.Module.FS_unlink) window.Module.FS_unlink(fname);
-    } catch (e) {}
+      window.Module && window.Module.FS_unlink && window.Module.FS_unlink(fname);
+    } catch {}
 
-    if (window.Module && window.Module.FS_createDataFile) {
-      window.Module.FS_createDataFile("/", fname, buf, true, true);
+    try {
+      window.Module && window.Module.FS_createDataFile && window.Module.FS_createDataFile("/", fname, buf, true, true);
+    } catch (e) {
+      dbg("FS_createDataFile failed: " + String(e.stack || e));
     }
 
-    dbg("storeFS: stored model: " + fname + " size: " + buf.length);
+    dbg("storeFS: stored model: " + fname + " size: " + (buf ? buf.length : "?"));
+    banner('Modelo carregado: "' + model_whisper + '". Você já pode clicar em Iniciar.');
 
-    // habilita runtime
-    model_whisper = model_whisper || "custom";
+    try { persist && persist.setLastModel && persist.setLastModel(model_whisper); } catch {}
     scheduleAutosave();
 
-    setBanner("Modelo carregado: " + model_whisper + ". Você já pode clicar em Iniciar.");
-    
-    // Notifica que o modelo foi carregado
-    try {
-      if (onModelLoaded) onModelLoaded();
-    } catch (e) {}
+    try { onModelLoaded && onModelLoaded(); } catch {}
   }
 
   function loadWhisper(model) {
-    // usa helpers.js: loadRemote(url, dst, sizeMB, cbProgress, cbReady, cbCancel, print)
     if (typeof window.loadRemote !== "function") {
       dbg("helpers.js not loaded? loadRemote missing");
-      setBanner("helpers.js não carregou (loadRemote ausente).");
+      banner("helpers.js não carregou (loadRemote ausente).");
+      try { onModelError && onModelError(); } catch {}
       return;
     }
 
-    // URLs corretas do repositorio HuggingFace
-    var urls = {
+    const urls = {
       "tiny.en": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
       "tiny": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
       "base.en": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
@@ -365,10 +461,10 @@ export function createWhisperBridge(opts) {
       "base-en-q5_1": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin",
       "base-q5_1": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin",
       "small-en-q5_1": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en-q5_1.bin",
-      "small-q5_1": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin"
+      "small-q5_1": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin",
     };
 
-    var sizes = {
+    const sizes = {
       "tiny.en": 75,
       "tiny": 75,
       "base.en": 142,
@@ -380,55 +476,45 @@ export function createWhisperBridge(opts) {
       "base-en-q5_1": 57,
       "base-q5_1": 57,
       "small-en-q5_1": 181,
-      "small-q5_1": 181
+      "small-q5_1": 181,
     };
 
-    var url = urls[model];
-    var dst = "whisper.bin";
-    var size_mb = sizes[model];
+    const url = urls[model];
+    const dst = "whisper.bin";
+    const size_mb = sizes[model];
 
     if (!url) {
-      setBanner("Modelo invalido: " + model);
+      banner("Modelo inválido: " + model);
+      try { onModelError && onModelError(); } catch {}
       return;
     }
 
     model_whisper = model;
-    try {
-      if (persist && persist.setLastModel) persist.setLastModel(model);
-    } catch (e) {}
 
-    var cbProgress = function(p) {
-      dbg("model progress: " + Math.round(100 * p) + "%");
-      try {
-        if (onModelProgress) onModelProgress(p);
-      } catch (e) {}
+    banner("Baixando modelo: " + model + " (" + size_mb + " MB)...");
+    scheduleAutosave();
+
+    const cbProgress = function (p) {
+      try { onModelProgress && onModelProgress(p); } catch {}
     };
 
-    var cbCancel = function() {
-      setBanner("Download do modelo cancelado.");
-      dbg("model download canceled");
-      try {
-        if (onModelError) onModelError();
-      } catch (e) {}
+    const cbCancel = function () {
+      banner("Download do modelo cancelado.");
+      try { onModelError && onModelError(); } catch {}
     };
-
-    setBanner("Baixando modelo: " + model + " (" + size_mb + " MB)...");
 
     window.loadRemote(
       url,
       dst,
       size_mb,
       cbProgress,
-      function(dst, buf) { storeFS(dst, buf); },
+      function (_dst, buf) { storeFS(_dst, buf); },
       cbCancel,
       dbg
     );
-
-    scheduleAutosave();
   }
 
   function init() {
-    // inicializa labels e transcript do persist (se ja recuperou)
     emitTranscript();
     emitStatus();
     emitTimer();
@@ -439,38 +525,24 @@ export function createWhisperBridge(opts) {
   }
 
   function setModel(m) {
-    model_whisper = m || model_whisper;
-  }
-
-  function getNLines() {
-    return nLines;
-  }
-
-  function setNLines(v) {
-    var n = Number(v);
-    if (Number.isFinite(n) && n >= 0) nLines = n;
-  }
-
-  function setTranscriptHtml(html) {
-    transcribedAll = html || "";
-  }
-
-  function getTranscriptHtml() {
-    return transcribedAll;
+    if (m) model_whisper = m;
   }
 
   return {
-    init: init,
-    start: start,
-    stop: stop,
-    loadWhisper: loadWhisper,
-    clearCache: clearCache,
-    clearTranscript: clearTranscript,
-    getModel: getModel,
-    setModel: setModel,
-    getNLines: getNLines,
-    setNLines: setNLines,
-    setTranscriptHtml: setTranscriptHtml,
-    getTranscriptHtml: getTranscriptHtml
+    init,
+    start,
+    stop,
+    loadWhisper,
+    clearCache,
+    clearTranscript,
+
+    getModel,
+    setModel,
+
+    getNLines,
+    setNLines,
+
+    setTranscriptHtml,
+    getTranscriptHtml,
   };
 }

@@ -306,7 +306,7 @@ watch(language, function() {
           <v-toolbar flat style="border-bottom: 1px solid #e5e7eb;">
             <div class="d-flex align-center ga-3 flex-wrap w-100">
               <div class="d-flex align-center ga-3 flex-wrap">
-                <div class="text-h6 font-weight-black" style="margin-left:10px;">Transcrição em Tempo Real</div>
+                <div class="text-h6 font-weight-black">Transcrição em Tempo Real</div>
 
                 <v-chip
                   size="small"
@@ -325,7 +325,7 @@ watch(language, function() {
 
               <v-chip
                 label
-                style="background:#f3f4f6; color:#374151; border:1px solid #e5e7eb; font-weight:800; margin-right:10px;"
+                style="background:#f3f4f6; color:#374151; border:1px solid #e5e7eb; font-weight:800;"
               >
                 <v-icon start size="12" :color="isRunning ? 'green' : 'grey'">mdi-circle</v-icon>
                 {{ statusText }}
