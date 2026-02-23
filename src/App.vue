@@ -11,9 +11,10 @@ const statusText = computed(function() { return isRunning.value ? "Gravando" : "
 const bannerMsg = ref("Clique em Configurações para carregar um modelo e começar a transcrição em tempo real.");
 
 const language = ref("pt");
-const selectedModel = ref("tiny-q5_1");
+const selectedModel = ref("small-q5_1");
 const modelLoading = ref(false);
 const modelProgress = ref(0);
+const consultationMode = ref(true);
 
 const modelOptions = [
   { title: "Tiny Q5.1 (31 MB) - Multilíngue, rápido", value: "tiny-q5_1" },
@@ -268,6 +269,7 @@ onMounted(async function() {
         modelProgress.value = 0;
       },
       getLanguage: function() { return language.value; },
+      getConsultationMode: function() { return consultationMode.value; },
       persist: persist
     });
 
@@ -289,6 +291,10 @@ onMounted(async function() {
 });
 
 watch(language, function() {
+  if (persist && persist.scheduleAutosave) persist.scheduleAutosave();
+});
+
+watch(consultationMode, function() {
   if (persist && persist.scheduleAutosave) persist.scheduleAutosave();
 });
 </script>
@@ -486,6 +492,22 @@ watch(language, function() {
                     variant="outlined"
                     density="comfortable"
                   />
+                </v-card-text>
+              </v-card>
+
+              <v-card variant="outlined" rounded="lg" class="mb-4">
+                <v-card-text>
+                  <div class="font-weight-black mb-2" style="font-size:13px;">Perfil da Consulta (PT-BR)</div>
+                  <v-switch
+                    v-model="consultationMode"
+                    color="primary"
+                    inset
+                    hide-details
+                    label="Aplicar correções clínicas/nutrição no texto"
+                  />
+                  <div class="mt-2" style="font-size:11px; color:#6b7280; line-height:1.4;">
+                    Recomendado para atendimentos com paciente e nutricionista.
+                  </div>
                 </v-card-text>
               </v-card>
 
