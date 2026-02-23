@@ -15,6 +15,7 @@ export function createWhisperBridge(opts) {
     onModelLoaded,
     onModelError,
     getLanguage,
+    getConsultationMode,
     persist,
   } = opts || {};
 
@@ -43,7 +44,7 @@ export function createWhisperBridge(opts) {
   // -----------------------------
   const kSampleRate = 16000;
   const kRestartRecording_s = 120;
-  const kIntervalAudio_ms = 5000;
+  const kIntervalAudio_ms = 3000;
 
   let mediaRecorder = null;
   let doRecording = false;
@@ -100,6 +101,35 @@ export function createWhisperBridge(opts) {
     if (!c) return;
     recentWindow.push(c);
     while (recentWindow.length > RECENT_MAX) recentWindow.shift();
+  }
+
+  function postProcessConsultationPT(text) {
+    let out = String(text || "").trim();
+    if (!out) return out;
+
+    const swaps = [
+      [/\bhemoglobina glicada\b/gi, "hemoglobina glicada"],
+      [/\bglicemia de jejum\b/gi, "glicemia de jejum"],
+      [/\bpress[aã]o (arterial)?\b/gi, "pressão arterial"],
+      [/\bcolesterol hdl\b/gi, "colesterol HDL"],
+      [/\bcolesterol ldl\b/gi, "colesterol LDL"],
+      [/\bimc\b/gi, "IMC"],
+      [/\bvitamina d\b/gi, "vitamina D"],
+      [/\bvitamina b12\b/gi, "vitamina B12"],
+      [/\bomega\s*3\b/gi, "ômega-3"],
+      [/\bhip[oó]tireoidismo\b/gi, "hipotireoidismo"],
+      [/\bhipertireoidismo\b/gi, "hipertireoidismo"],
+      [/\bresist[eê]ncia [aà] insulina\b/gi, "resistência à insulina"],
+      [/\bintoler[aâ]ncia [aà] lactose\b/gi, "intolerância à lactose"],
+      [/\bdor de cabe[cç]a\b/gi, "dor de cabeça"],
+    ];
+
+    for (const [rx, rep] of swaps) {
+      out = out.replace(rx, rep);
+    }
+
+    out = out.replace(/\s{2,}/g, " ").trim();
+    return out;
   }
 
   // -----------------------------
@@ -192,7 +222,16 @@ export function createWhisperBridge(opts) {
     let stream = null;
 
     navigator.mediaDevices
-      .getUserMedia({ audio: true, video: false })
+      .getUserMedia({
+        audio: {
+          channelCount: { ideal: 1 },
+          sampleRate: { ideal: kSampleRate },
+          echoCancellation: { ideal: true },
+          noiseSuppression: { ideal: true },
+          autoGainControl: { ideal: true },
+        },
+        video: false,
+      })
       .then(function (s) {
         stream = s;
         mediaRecorder = new MediaRecorder(stream);
@@ -223,7 +262,13 @@ export function createWhisperBridge(opts) {
                 source.start(0);
 
                 offlineContext.startRendering().then(function (renderedBuffer) {
-                  audio = renderedBuffer.getChannelData(0);
+                  const mixed = new Float32Array(renderedBuffer.length);
+                  const channels = renderedBuffer.numberOfChannels;
+                  for (let ch = 0; ch < channels; ch++) {
+                    const data = renderedBuffer.getChannelData(ch);
+                    for (let i = 0; i < mixed.length; i++) mixed[i] += data[i] / channels;
+                  }
+                  audio = mixed;
 
                   const audioAll = new Float32Array(audio0 == null ? audio.length : audio0.length + audio.length);
                   if (audio0 != null) audioAll.set(audio0, 0);
@@ -335,7 +380,10 @@ export function createWhisperBridge(opts) {
           const decision = shouldAppend(transcribed);
 
           if (decision && decision.ok) {
-            const toAppend = decision.append;
+            const consultationMode = !!(getConsultationMode && getConsultationMode());
+            const toAppend = consultationMode
+              ? postProcessConsultationPT(decision.append)
+              : decision.append;
 
             // mantém HTML com <br> no final (como você já usa na UI)
             transcribedAll += toAppend + "<br>";
